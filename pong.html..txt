@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Pong — HTML5</title>
+<style>
+  html,body { height:100%; margin:0; background:#000; color:#fff; font-family:system-ui,-apple-system,Segoe UI,Roboto; }
+  #gameWrap { position:relative; width:100%; height:100vh; display:flex; align-items:center; justify-content:center; }
+  canvas { background:#000; touch-action:none; display:block; max-width:100%; height:auto; border: 1px solid rgba(255,255,255,0.03);}
+  #ui { position:absolute; top:12px; left:12px; right:12px; display:flex; justify-content:space-between; pointer-events:none; }
+  .btn { pointer-events:auto; background:rgba(255,255,255,0.06); border-radius:8px; padding:8px 10px; font-size:14px; backdrop-filter: blur(6px); }
+  #score { font-weight:600; font-size:18px; text-align:center; min-width:140px; }
+  #controls { display:flex; gap:8px; }
+  #hint { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); font-size:13px; opacity:0.85; }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <div id="ui">
+    <div class="btn" id="score">Player 0 — 0 CPU</div>
+    <div id="controls">
+      <button class="btn" id="startBtn">Start</button>
+      <button class="btn" id="soundBtn">🔊</button>
+      <button class="btn" id="resetBtn">Reset</button>
+    </div>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <div id="hint">Touch & drag the bottom paddle. Tap the top area to control top paddle (2-player). Add to Home Screen: Share → "Add to Home Screen".</div>
+</div>
+
+<script>
+/* Simple mobile-friendly Pong */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+let W = 800, H = 1200; // logical resolution (will scale)
+let scaleToFit = true;
+
+function resizeCanvas(){
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // fit to viewport while keeping aspect ratio near W:H
+  const aspect = W/H;
+  let cw = vw;
+  let ch = Math.round(cw / aspect);
+  if (ch > vh) { ch = vh; cw = Math.round(ch * aspect); }
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+  canvas.width = Math.round(cw * DPR);
+  canvas.height = Math.round(ch * DPR);
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+/* Game state */
+const state = {
+  running: false,
+  scoreP: 0,
+  scoreCPU: 0,
+  ball: { x: W/2, y: H/2, r: 10, vx: 0, vy: 0 },
+  paddleP: { w: 140, h: 18, x: W/2 - 70, y: H - 80 },
+  paddleCPU: { w: 140, h: 18, x: W/2 - 70, y: 60 },
+  lastTime: 0,
+  soundOn: true,
+  twoPlayer: false
+};
+
+/* Audio (tiny beeps) */
+function beep(freq=800, dur=0.04, vol=0.06){
+  if(!state.soundOn) return;
+  try {
+    const ctxA = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctxA.createOscillator();
+    const g = ctxA.createGain();
+    o.type = 'square';
+    o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(ctxA.destination);
+    o.start();
+    setTimeout(()=>{ o.stop(); ctxA.close().catch(()=>{}); }, dur*1000);
+  } catch(e){}
+}
+
+/* Helpers */
+function resetBall(servingDown=true){
+  state.ball.x = W/2;
+  state.ball.y = H/2;
+  const speed = 6 + Math.random()*2;
+  const ang = (Math.random()*Math.PI/3) - Math.PI/6; // -30..30 deg
+  state.ball.vx = speed * Math.cos(ang) * (Math.random()<0.5?-1:1);
+  state.ball.vy = speed * (servingDown ? 1 : -1);
+}
+
+resetBall(true);
+
+/* Input - touch and mouse (map to canvas coords) */
+function toLocalCoord(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  const x = (clientX - rect.left) * (canvas.width / (rect.width * DPR)) ;
+  const y = (clientY - rect.top) * (canvas.height / (rect.height * DPR));
+  // convert back to logical coords at DPR = 1 scale
+  return { x: x / DPR, y: y / DPR };
+}
+
+let ongoingTouch = null;
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  const t = e.touches[0];
+  const p = toLocalCoord(t.clientX, t.clientY);
+  if (p.y > H*0.6) ongoingTouch = 'player';
+  else ongoingTouch = 'cpu';
+  handleTouchMove(p);
+});
+canvas.addEventListener('touchmove', e=>{
+  e.preventDefault();
+  const t = e.touches[0];
+  const p = toLocalCoord(t.clientX, t.clientY);
+  handleTouchMove(p);
+});
+canvas.addEventListener('touchend', e=>{
+  ongoingTouch = null;
+});
+canvas.addEventListener('mousemove', e=>{
+  if (e.buttons !== 1) return;
+  const p = toLocalCoord(e.clientX, e.clientY);
+  handleTouchMove(p);
+});
+function handleTouchMove(p){
+  // move bottom paddle when dragging bottom half
+  if (p.y > H*0.6) {
+    state.paddleP.x = clamp(p.x - state.paddleP.w/2, 8, W - state.paddleP.w - 8);
+  } else {
+    // control top paddle for 2-player mode
+    if (state.twoPlayer) state.paddleCPU.x = clamp(p.x - state.paddleCPU.w/2, 8, W - state.paddleCPU.w - 8);
+  }
+}
+
+/* Simple AI for top paddle */
+function updateAI(){
+  const target = state.ball.x - state.paddleCPU.w/2;
+  const diff = target - state.paddleCPU.x;
+  // speed scales with ball
+  const sp = 3 + Math.abs(state.ball.vx)*0.6;
+  state.paddleCPU.x += clamp(diff, -sp, sp);
+  state.paddleCPU.x = clamp(state.paddleCPU.x, 8, W - state.paddleCPU.w - 8);
+}
+
+/* Collision helpers */
+function rectsOverlap(rx,ry,rw,rh, x,y,r){
+  return (x + r > rx && x - r < rx + rw && y + r > ry && y - r < ry + rh);
+}
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+/* Main update */
+function step(ts){
+  if (!state.running) { draw(); return; }
+  const dt = Math.min(0.033, (ts - state.lastTime) / 1000 || 0.016);
+  state.lastTime = ts;
+
+  // move ball
+  state.ball.x += state.ball.vx * (60 * dt);
+  state.ball.y += state.ball.vy * (60 * dt);
+
+  // wall bounce (left/right)
+  if (state.ball.x - state.ball.r < 6) { state.ball.x = 6 + state.ball.r; state.ball.vx *= -1; beep(900,0.02); }
+  if (state.ball.x + state.ball.r > W - 6) { state.ball.x = W - 6 - state.ball.r; state.ball.vx *= -1; beep(900,0.02); }
+
+  // paddle collisions
+  if (rectsOverlap(state.paddleP.x, state.paddleP.y, state.paddleP.w, state.paddleP.h, state.ball.x, state.ball.y, state.ball.r)
+      && state.ball.vy > 0) {
+    // reflect
+    state.ball.y = state.paddleP.y - state.ball.r - 0.1;
+    state.ball.vy *= -1;
+    // add spin based on where it hits paddle
+    const hit = (state.ball.x - (state.paddleP.x + state.paddleP.w/2)) / (state.paddleP.w/2);
+    state.ball.vx += hit * 2;
+    // limit speed
+    const sp = Math.min(12, Math.hypot(state.ball.vx, state.ball.vy) + 0.6);
+    const ang = Math.atan2(state.ball.vy, state.ball.vx);
+    state.ball.vx = sp * Math.cos(ang);
+    state.ball.vy = sp * Math.sin(ang);
+    beep(1200,0.03);
+  }
+
+  if (rectsOverlap(state.paddleCPU.x, state.paddleCPU.y, state.paddleCPU.w, state.paddleCPU.h, state.ball.x, state.ball.y, state.ball.r)
+      && state.ball.vy < 0) {
+    state.ball.y = state.paddleCPU.y + state.paddleCPU.h + state.ball.r + 0.1;
+    state.ball.vy *= -1;
+    const hit = (state.ball.x - (state.paddleCPU.x + state.paddleCPU.w/2)) / (state.paddleCPU.w/2);
+    state.ball.vx += hit * 2;
+    const sp = Math.min(12, Math.hypot(state.ball.vx, state.ball.vy) + 0.6);
+    const ang = Math.atan2(state.ball.vy, state.ball.vx);
+    state.ball.vx = sp * Math.cos(ang);
+    state.ball.vy = sp * Math.sin(ang);
+    beep(1200,0.03);
+  }
+
+  // score check
+  if (state.ball.y - state.ball.r > H) {
+    // CPU scores
+    state.scoreCPU++;
+    state.running = false;
+    beep(400,0.08);
+    setTimeout(()=>{ resetBall(false); start(); }, 700);
+  } else if (state.ball.y + state.ball.r < 0) {
+    // Player scores
+    state.scoreP++;
+    state.running = false;
+    beep(1400,0.08);
+    setTimeout(()=>{ resetBall(true); start(); }, 700);
+  }
+
+  updateAI();
+  draw();
+  requestAnimationFrame(step);
+}
+
+/* Draw */
+function draw(){
+  // clear
+  ctx.clearRect(0,0,canvas.width/DPR, canvas.height/DPR);
+  // scale virtual size to canvas display size
+  const cw = canvas.width/DPR, ch = canvas.height/DPR;
+  // calculate scale to fit virtual W/H into cw/ch
+  const sx = cw / W, sy = ch / H;
+  const s = Math.min(sx, sy);
+  ctx.save();
+  ctx.scale(s,s);
+  // center letterbox
+  const ox = (cw/s - W)/2, oy = (ch/s - H)/2;
+  ctx.translate(ox, oy);
+
+  // middle dashed line
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 4;
+  for (let y=40;y<H-40;y+=28){
+    ctx.beginPath();
+    ctx.moveTo(W/2 - 2, y);
+    ctx.lineTo(W/2 + 2, y+18);
+    ctx.stroke();
+  }
+
+  // paddles
+  ctx.fillStyle = '#fff';
+  roundRect(ctx, state.paddleP.x, state.paddleP.y, state.paddleP.w, state.paddleP.h, 6, true, false);
+  roundRect(ctx, state.paddleCPU.x, state.paddleCPU.y, state.paddleCPU.w, state.paddleCPU.h, 6, true, false);
+
+  // ball
+  ctx.beginPath();
+  ctx.arc(state.ball.x, state.ball.y, state.ball.r, 0, Math.PI*2);
+  ctx.fill();
+
+  // scores (drawn in CSS UI too)
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(8, H-46, 220, 36);
+  ctx.fillRect(W-228, 8, 220, 36);
+  ctx.fillStyle = '#fff';
+  ctx.font = '22px ui-sans-serif,system-ui';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Player: ' + state.scoreP, 16, H-28);
+  ctx.fillText('CPU: ' + state.scoreCPU, W-220, 26);
+
+  ctx.restore();
+}
+
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  if (typeof r === 'undefined') r = 5;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  if (fill) ctx.fill();
+  if (stroke) ctx.stroke();
+}
+
+/* Controls */
+document.getElementById('startBtn').addEventListener('click', ()=>{ start(); });
+document.getElementById('resetBtn').addEventListener('click', ()=>{ state.scoreP = 0; state.scoreCPU = 0; resetBall(true); draw(); });
+document.getElementById('soundBtn').addEventListener('click', ()=>{
+  state.soundOn = !state.soundOn;
+  document.getElementById('soundBtn').textContent = state.soundOn ? '🔊' : '🔈';
+});
+
+/* Start/pause */
+function start(){
+  if (!state.running){
+    state.running = true;
+    state.lastTime = performance.now();
+    requestAnimationFrame(step);
+  }
+}
+
+/* init draw & responsive mapping between logical W/H and canvas size */
+function initLogicalSize(){
+  // choose logical H based on actual aspect to keep things playable
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const ratio = vw/vh;
+  // keep width flexible
+  W = Math.max(600, Math.min(1000, Math.round(800 * Math.min(1.2, ratio * 1.2))));
+  H = Math.round(W * (3/2)); // tall playfield for mobile
+}
+initLogicalSize();
+resetBall(true);
+resizeCanvas();
+draw();
+
+/* Add to UI score mirror */
+setInterval(()=>{ document.getElementById('score').textContent = `Player ${state.scoreP} — ${state.scoreCPU} CPU`; }, 200);
+
+</script>
+</body>
+</html>
