@@ -32,6 +32,20 @@
 </div>
 
 <script>
+  
+  const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+// Make the canvas fill the screen
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+const W = canvas.width;
+const H = canvas.height;
+
+let paddleP = { w: 140, h: 18, x: W/2 - 70, y: H - 60 }; // Player paddle 60px above bottom
+let paddleAI = { w: 140, h: 18, x: W/2 - 70, y: 40 };    // AI paddle at top
+  
 /* Simple mobile-friendly Pong */
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -63,7 +77,7 @@ const state = {
   scoreP: 0,
   scoreCPU: 0,
   ball: { x: W/2, y: H/2, r: 10, vx: 0, vy: 0 },
-  paddleP: { w: 140, h: 18, x: W/2 - 70, y: H - 40 },
+  paddleP: { w: 140, h: 18, x: W/2 - 70, y: H - 60 },
   paddleCPU: { w: 140, h: 18, x: W/2 - 70, y: 60 },
   lastTime: 0,
   soundOn: true,
